@@ -1629,6 +1629,20 @@ class Robot(USDObject, GymObservable):
         if not self.is_holonomic_base:
             return base_qvel
 
+        # DIAGNOSTIC GATE (terraforge, 2026-08-15). v3.9.1 (26f2c7ef7, 2026-07-28)
+        # changed base_qvel from world-frame joint velocities to ROBOT-LOCAL, and
+        # re-released the demos to match. The challenge's provided GR00T N1.7 and pi0.5
+        # checkpoints were published 2026-07-02 against v3.9.0 -- 26 days EARLIER -- so
+        # their statistics.json carries the pre-fix distribution while the docs mandate
+        # evaluating them on v3.9.1. Measured: 16.4% of post-fix frames fall outside the
+        # checkpoint's q01/q99 window, and its processor runs use_percentiles=True with
+        # clip_outliers=True, so those saturate rather than degrade gracefully.
+        # Setting B1K_LEGACY_BASE_QVEL=1 restores the pre-fix convention so a
+        # pre-fix checkpoint can be evaluated under the contract it was trained on.
+        # DEFAULT IS UNCHANGED (v3.9.1 behaviour); this is opt-in and diagnostic only.
+        if os.environ.get("B1K_LEGACY_BASE_QVEL") == "1":
+            return base_qvel
+
         base_qpos_6dof = joint_positions[self.base_idx]
         yaw = base_qpos_6dof[5]
         c = th.cos(yaw)
