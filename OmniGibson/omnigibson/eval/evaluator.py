@@ -274,7 +274,11 @@ class Evaluator:
             pos, quat = o.get_position_orientation()
             poses.append(_np.concatenate([_np.asarray(pos, dtype=_np.float32).ravel()[:3],
                                           _np.asarray(quat, dtype=_np.float32).ravel()[:4]]))
-        bp, bq = self.robot.get_position_orientation()
+        # HOLONOMIC TRAP (same as the training-side extractor found): the robot's ROOT
+        # pose is world-anchored and never moves -- locomotion lives in virtual base
+        # joints. base_footprint_link carries the actual base pose at runtime.
+        base_link = getattr(self.robot, "base_footprint_link", None)
+        bp, bq = (base_link if base_link is not None else self.robot).get_position_orientation()
         obs["obb::object_world_poses"] = th.as_tensor(_np.stack(poses))
         obs["obb::base_world_pose"] = th.as_tensor(_np.concatenate([
             _np.asarray(bp, dtype=_np.float32).ravel()[:3],
