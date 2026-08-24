@@ -249,7 +249,40 @@ class Evaluator:
     def load_metrics(self) -> List[MetricBase]:
         return [AgentMetric(self.human_stats), TaskMetric(self.human_stats)]
 
+    def _attach_obb_poses(self, obs: dict) -> dict:
+        """DIAGNOSTIC GATE (terraforge, 2026-08-25). When B1K_OBB_OBJECTS is set (comma-
+        separated object names), attach raw WORLD poses of those objects plus the robot
+        base to the obs dict shipped to the policy server. The server composes the
+        sparse-object-3-D channel from these with the SAME code convention as training
+        (train/eval parity is gated by replaying a training episode through the server
+        constructor -- see the C1c preflight). Default OFF: without the env var this is
+        byte-identical to upstream behaviour.
+
+        Poses only -- no bbox computation here. Static local box geometry lives in the
+        training bootstrap file the server loads once; per-step cost is a handful of
+        get_position_orientation calls (~microseconds), not get_base_aligned_bbox.
+        """
+        names = os.environ.get("B1K_OBB_OBJECTS", "")
+        if not names:
+            return obs
+        import numpy as _np
+        poses = []
+        for nm in names.split(","):
+            o = self.env.scene.object_registry("name", nm)
+            if o is None:
+                raise RuntimeError(f"B1K_OBB_OBJECTS: object {nm!r} not in scene")
+            pos, quat = o.get_position_orientation()
+            poses.append(_np.concatenate([_np.asarray(pos, dtype=_np.float32).ravel()[:3],
+                                          _np.asarray(quat, dtype=_np.float32).ravel()[:4]]))
+        bp, bq = self.robot.get_position_orientation()
+        obs["obb::object_world_poses"] = th.as_tensor(_np.stack(poses))
+        obs["obb::base_world_pose"] = th.as_tensor(_np.concatenate([
+            _np.asarray(bp, dtype=_np.float32).ravel()[:3],
+            _np.asarray(bq, dtype=_np.float32).ravel()[:4]]))
+        return obs
+
     def step(self) -> Tuple[bool, bool]:
+        self.obs = self._attach_obb_poses(self.obs)
         self.robot_action = self.policy.forward(obs=self.obs)
         obs, _, terminated, truncated, info = self.env.step(self.robot_action, n_render_iterations=1)
         obs = self._sync_lights_and_get_obs(obs)
