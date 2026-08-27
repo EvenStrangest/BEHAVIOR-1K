@@ -3,6 +3,47 @@ from omnigibson.metrics.metric_base import MetricBase
 from typing import Optional
 
 
+def _describe_predicate(pred):
+    """Structured description of one ground goal predicate.
+
+    The name lives in different places depending on the node: a BinaryAtomicFormula keeps its
+    arguments in `body` and its name in the class attribute `STATE_NAME`, while a Negation
+    keeps the whole raw form (name included) in `body` and the atom as its single child. So
+    neither `str(body)` nor `STATE_NAME` alone identifies a predicate, and downstream analysis
+    should not have to re-parse a rendered string -- hence the structured fields.
+    """
+    name = getattr(pred, "STATE_NAME", None)
+    body = getattr(pred, "body", None)
+    kids = list(getattr(pred, "children", None) or [])
+    if name:
+        args = [str(a).strip("?") for a in (body or [])]
+        return {
+            "predicate": "({} {})".format(name, " ".join(args)).strip(),
+            "state": name,
+            "negated": False,
+            "args": args,
+        }
+    # Detect negation STRUCTURALLY (no STATE_NAME, exactly one child) rather than by matching
+    # the class name. Ground goal-state options are conjunctions of literals -- De Morgan is
+    # applied during grounding -- so a node with no predicate name and a single child is a
+    # negated atom. Matching on the string "Negation" silently degrades to the unlabelled
+    # fallback for any subclass or rename, and the degradation is invisible in the output.
+    if len(kids) == 1:
+        inner = _describe_predicate(kids[0])
+        return {
+            "predicate": "(not {})".format(inner["predicate"]),
+            "state": inner["state"],
+            "negated": not inner["negated"],
+            "args": inner["args"],
+        }
+    return {
+        "predicate": "({} {})".format(type(pred).__name__, body),
+        "state": type(pred).__name__,
+        "negated": False,
+        "args": [],
+    }
+
+
 class TaskMetric(MetricBase):
     def __init__(self, human_stats: Optional[dict] = None):
         super().__init__()
@@ -51,14 +92,15 @@ class TaskMetric(MetricBase):
             preds = []
             for pred, initially_true in zip(option, option_previous_state):
                 now = bool(pred.evaluate(env.task._evaluate_predicate))
-                preds.append(
+                d = _describe_predicate(pred)
+                d.update(
                     {
-                        "predicate": str(getattr(pred, "body", pred)),
                         "initially_true": bool(initially_true),
                         "final_true": now,
                         "newly_true": bool(now and not initially_true),
                     }
                 )
+                preds.append(d)
             options_detail.append(preds)
 
         option_scores = [
