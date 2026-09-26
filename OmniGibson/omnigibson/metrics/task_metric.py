@@ -28,6 +28,47 @@ def compute_q_score(
     return max(option_scores) if option_scores else 0.0
 
 
+def _describe_predicate(pred):
+    """Structured description of one ground goal predicate.
+
+    The name lives in different places depending on the node: a BinaryAtomicFormula keeps its
+    arguments in `body` and its name in the class attribute `STATE_NAME`, while a Negation
+    keeps the whole raw form (name included) in `body` and the atom as its single child. So
+    neither `str(body)` nor `STATE_NAME` alone identifies a predicate, and downstream analysis
+    should not have to re-parse a rendered string -- hence the structured fields.
+    """
+    name = getattr(pred, "STATE_NAME", None)
+    body = getattr(pred, "body", None)
+    kids = list(getattr(pred, "children", None) or [])
+    if name:
+        args = [str(a).strip("?") for a in (body or [])]
+        return {
+            "predicate": "({} {})".format(name, " ".join(args)).strip(),
+            "state": name,
+            "negated": False,
+            "args": args,
+        }
+    # Detect negation STRUCTURALLY (no STATE_NAME, exactly one child) rather than by matching
+    # the class name. Ground goal-state options are conjunctions of literals -- De Morgan is
+    # applied during grounding -- so a node with no predicate name and a single child is a
+    # negated atom. Matching on the string "Negation" silently degrades to the unlabelled
+    # fallback for any subclass or rename, and the degradation is invisible in the output.
+    if len(kids) == 1:
+        inner = _describe_predicate(kids[0])
+        return {
+            "predicate": "(not {})".format(inner["predicate"]),
+            "state": inner["state"],
+            "negated": not inner["negated"],
+            "args": inner["args"],
+        }
+    return {
+        "predicate": "({} {})".format(type(pred).__name__, body),
+        "state": type(pred).__name__,
+        "negated": False,
+        "args": [],
+    }
+
+
 class TaskMetric(MetricBase):
     def __init__(self, human_stats: Optional[dict] = None, env_idx: int = 0, env_accessor=None):
         super().__init__(env_idx=env_idx, env_accessor=env_accessor)
@@ -61,18 +102,42 @@ class TaskMetric(MetricBase):
 
         # task.success is a (num_envs,) bool tensor; read THIS env's slot. Partial credit (when not a
         # full success) counts newly-satisfied goal predicates per option, max over options.
+        now_satisfied = (
+            env.get_goal_option_satisfaction()
+            if env is self.env_accessor
+            else env.task.get_goal_option_satisfaction(self.env_idx)
+        )
         final_q_score = compute_q_score(
             success=env.success if env is self.env_accessor else bool(env.task.success[self.env_idx]),
-            now_satisfied_options=(
-                env.get_goal_option_satisfaction()
-                if env is self.env_accessor
-                else env.task.get_goal_option_satisfaction(self.env_idx)
-            ),
+            now_satisfied_options=now_satisfied,
             initial_satisfied_options=self.initial_predicate_states,
         )
 
+        # Per-predicate breakdown (terraforge; ported to the vectorized metric 2026-09-26 from the
+        # 2026-08-27 single-env version). The aggregate q is not interpretable on its own: for
+        # putting_shoes_on_rack 8 of 10 ground predicates are per-shoe `touching hallstand` / `not
+        # touching floor`, so a shoe merely lifted off the floor scores credit. Derived from the SAME
+        # satisfaction masks that compute_q_score consumes, so it can never disagree with `final`.
+        # Masks are indexed by position within each ground_goal_state_options entry.
+        task = env.shared_env.task if env is self.env_accessor else env.task
+        options_detail = []
+        for option, now_opt, init_opt in zip(task.ground_goal_state_options, now_satisfied, self.initial_predicate_states):
+            preds = []
+            for pred, now, init in zip(option, now_opt, init_opt):
+                d = _describe_predicate(pred)
+                d.update({"initially_true": bool(init), "final_true": bool(now), "newly_true": bool(now and not init)})
+                preds.append(d)
+            options_detail.append(preds)
+        option_scores = [sum(d["newly_true"] for d in p) / len(p) if p else 0.0 for p in options_detail]
+        best = max(range(len(option_scores)), key=option_scores.__getitem__) if option_scores else -1
+
         return {
-            "q_score": {"final": final_q_score},
+            "q_score": {
+                "final": final_q_score,
+                "predicates": options_detail[best] if best >= 0 else [],
+                "option_index": best,
+                "n_options": len(options_detail),
+            },
             "time": {
                 "simulator_steps": timesteps,
                 "simulator_time": timesteps * self.render_timestep,
