@@ -23,13 +23,24 @@ def _describe_predicate(pred):
             "negated": False,
             "args": args,
         }
-    # Detect negation STRUCTURALLY (no STATE_NAME, exactly one child) rather than by matching
-    # the class name. Ground goal-state options are conjunctions of literals -- De Morgan is
-    # applied during grounding -- so a node with no predicate name and a single child is a
-    # negated atom. Matching on the string "Negation" silently degrades to the unlabelled
-    # fallback for any subclass or rename, and the degradation is invisible in the output.
+    # One-child nodes are NOT all negations. The 2026-08-27 version assumed "no STATE_NAME and
+    # exactly one child" meant a negated atom; on real BDDL trees that also matches single-element
+    # containers (a Universal/Existential/Conjunction over one object, the HEAD wrapper), and the
+    # 2026-09-26 v3.9.3 parity replay showed it: `touching sandal hallstand` -- which goes False ->
+    # True as the shoe lands on the rack -- was labelled "(not (touching ...))". Only a genuine
+    # bddl Negation flips the sign (isinstance against bddl's own class, falling back to the class
+    # name if bddl cannot be imported); every other one-child node is transparent. Labels only --
+    # scores come from the satisfaction masks and were never affected.
     if len(kids) == 1:
         inner = _describe_predicate(kids[0])
+        try:
+            from bddl.condition_evaluation import Negation as _Negation
+            is_neg = isinstance(pred, _Negation)
+        except Exception:
+            is_neg = False
+        is_neg = is_neg or type(pred).__name__ == "Negation"
+        if not is_neg:
+            return inner
         return {
             "predicate": "(not {})".format(inner["predicate"]),
             "state": inner["state"],
